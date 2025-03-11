@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audio Streaming with WebSocket</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      h1 {
+        color: #333;
+      }
+      .player-container {
+        margin: 20px 0;
+      }
+      select {
+        padding: 8px;
+        margin-bottom: 20px;
+      }
+      button {
+        padding: 8px 16px;
+        background-color: #4caf50;
+        color: white;
+        border: none;
+        cursor: pointer;
+        margin-right: 10px;
+      }
+      button:hover {
+        background-color: #45a049;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+      }
+      #status {
+        margin-top: 20px;
+        padding: 10px;
+        background-color: #f8f8f8;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Audio Streaming with WebSocket</h1>
+
+    <div>
+      <select id="audioSelector">
+        <option value="sample-3s.mp3">Sample 3s</option>
+        <option value="sample-6s.mp3">Sample 6s</option>
+        <option value="sample-9s.mp3">Sample 9s</option>
+        <option value="sample-12s.mp3">Sample 12s</option>
+        <option value="sample-15s.mp3">Sample 15s</option>
+      </select>
+    </div>
+
+    <div>
+      <button id="connectBtn">Connect</button>
+      <button id="startBtn" disabled>Start Streaming</button>
+      <button id="stopBtn" disabled>Stop Streaming</button>
+    </div>
+
+    <div class="player-container">
+      <audio id="audioPlayer" controls></audio>
+    </div>
+
+    <div id="status">Status: Disconnected</div>
+
+    <script>
+      let ws;
+      let mediaSource;
+      let sourceBuffer;
+      let audioQueue = [];
+      let isPlaying = false;
+
+      const connectBtn = document.getElementById("connectBtn");
+      const startBtn = document.getElementById("startBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const audioSelector = document.getElementById("audioSelector");
+      const audioPlayer = document.getElementById("audioPlayer");
+      const statusDiv = document.getElementById("status");
+
+      connectBtn.addEventListener("click", connectWebSocket);
+      startBtn.addEventListener("click", startStreaming);
+      stopBtn.addEventListener("click", stopStreaming);
+
+      function initMediaSource() {
+        mediaSource = new MediaSource();
+        audioPlayer.src = URL.createObjectURL(mediaSource);
+
+        mediaSource.addEventListener("sourceopen", function () {
+          sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
+          sourceBuffer.mode = "sequence";
+
+          sourceBuffer.addEventListener("updateend", function () {
+            if (audioQueue.length > 0 && !sourceBuffer.updating) {
+              sourceBuffer.appendBuffer(audioQueue.shift());
+            }
+          });
+        });
+      }
+
+      function connectWebSocket() {
+        if (ws) {
+          ws.close();
+        }
+
+        statusDiv.textContent = "Status: Connecting...";
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+        ws.onopen = function () {
+          statusDiv.textContent = "Status: Connected";
+          connectBtn.disabled = true;
+          startBtn.disabled = false;
+        };
+
+        ws.onmessage = function (event) {
+          if (event.data instanceof Blob) {
+            event.data.arrayBuffer().then((buffer) => {
+              if (sourceBuffer && !sourceBuffer.updating) {
+                try {
+                  sourceBuffer.appendBuffer(buffer);
+                } catch (e) {
+                  console.error("Error appending buffer:", e);
+                }
+              } else {
+                audioQueue.push(buffer);
+              }
+            });
+          } else {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === "status") {
+                statusDiv.textContent = `Status: ${message.data}`;
+                if (message.data === "Streaming finished") {
+                  startBtn.disabled = false;
+                  stopBtn.disabled = true;
+                }
+              }
+            } catch (e) {
+              console.error("Error parsing message:", e);
+            }
+          }
+        };
+
+        ws.onclose = function () {
+          statusDiv.textContent = "Status: Disconnected";
+          connectBtn.disabled = false;
+          startBtn.disabled = true;
+          stopBtn.disabled = true;
+        };
+
+        ws.onerror = function (error) {
+          statusDiv.textContent = "Status: Error occurred";
+          console.error("WebSocket error:", error);
+        };
+      }
+
+      function startStreaming() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          statusDiv.textContent = "Status: Not connected";
+          return;
+        }
+
+        // Reset MediaSource for new stream
+        if (mediaSource) {
+          URL.revokeObjectURL(audioPlayer.src);
+        }
+        audioQueue = [];
+        initMediaSource();
+
+        const selectedAudio = audioSelector.value;
+        ws.send(
+          JSON.stringify({
+            action: "start",
+            filename: selectedAudio,
+          })
+        );
+
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+
+        // Start playing when we have some data
+        audioPlayer.play().catch((err) => {
+          console.error("Error playing audio:", err);
+          statusDiv.textContent = "Status: Error playing audio";
+        });
+      }
+
+      function stopStreaming() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+
+        ws.send(
+          JSON.stringify({
+            action: "stop",
+          })
+        );
+
+        if (mediaSource && mediaSource.readyState === "open") {
+          mediaSource.endOfStream();
+        }
+
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    </script>
+  </body>
+</html>
